@@ -1,5 +1,7 @@
 # 🚀 Multi-Account MT5 Trade Copier
 
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/3b6428ef-0ad2-4664-bf91-cfe97ceb39c1" />
+
 A powerful Python-based **MetaTrader 5 Trade Copier** with a modern GUI built using **Tkinter**.  
 This tool allows you to manage and execute trades across multiple prop firm or personal accounts simultaneously with advanced risk management features.
 
@@ -46,7 +48,7 @@ A lightweight desktop trading panel inspired by modern trading terminals.
 ## 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/trade-copier.git
+git clone https://github.com/githiji/Trade_copier.git
 
 cd trade-copier
 ```
@@ -184,7 +186,7 @@ Trading involves risk. Use at your own responsibility.
 
 # 👨‍💻 Author
 
-Built by a trader & developer focused on automation, risk management, and prop firm trading systems.
+Built by Brian Githinji trader & developer focused on automation, risk management, and prop firm trading systems.
 
 ---
 
