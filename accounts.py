@@ -252,6 +252,28 @@ class AccountManager:
         )
         self.drop_label.pack(fill="x", pady=(0, 10))
 
+        action_row = ttk.Frame(main)
+        action_row.pack(fill="x", pady=(0, 10))
+
+        ttk.Button(action_row, text="Activate Selected", command=lambda: self.set_selected_enabled(1)).pack(
+            side="left",
+            expand=True,
+            fill="x",
+            padx=(0, 4),
+        )
+        ttk.Button(action_row, text="Deactivate Selected", command=lambda: self.set_selected_enabled(0)).pack(
+            side="left",
+            expand=True,
+            fill="x",
+            padx=4,
+        )
+        ttk.Button(action_row, text="Remove Selected", style="Danger.TButton", command=self.remove_selected).pack(
+            side="right",
+            expand=True,
+            fill="x",
+            padx=(4, 0),
+        )
+
         self.account_table = ttk.Treeview(
             main,
             columns=("id", "login", "server", "status", "path"),
@@ -270,28 +292,6 @@ class AccountManager:
         self.account_table.column("status", width=90, anchor="center")
         self.account_table.column("path", width=330)
         self.account_table.pack(fill="both", expand=True, pady=(0, 10))
-
-        action_row = ttk.Frame(main)
-        action_row.pack(fill="x")
-
-        ttk.Button(action_row, text="Enable Selected", command=lambda: self.set_selected_enabled(1)).pack(
-            side="left",
-            expand=True,
-            fill="x",
-            padx=(0, 4),
-        )
-        ttk.Button(action_row, text="Disable Selected", command=lambda: self.set_selected_enabled(0)).pack(
-            side="left",
-            expand=True,
-            fill="x",
-            padx=4,
-        )
-        ttk.Button(action_row, text="Remove Selected", style="Danger.TButton", command=self.remove_selected).pack(
-            side="right",
-            expand=True,
-            fill="x",
-            padx=(4, 0),
-        )
 
         self.refresh()
         self.root.after(100, self.enable_file_drop)

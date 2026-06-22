@@ -51,6 +51,37 @@ def calculate_risk_reward_ratio(entry_price, sl_price, tp_price, order_type):
     return reward / risk
 
 
+def get_trade_validation_error(entry_price, sl_price, tp_price, order_type, min_rr=MIN_RISK_REWARD_RATIO):
+    if entry_price <= 0:
+        return "Entry price is missing."
+    if sl_price <= 0:
+        return "Enter a stop loss price."
+    if tp_price <= 0:
+        return "Enter a take profit price."
+
+    if "buy" in order_type:
+        if sl_price >= entry_price:
+            return f"For BUY, SL ({sl_price}) must be below entry ({entry_price})."
+        if tp_price <= entry_price:
+            return f"For BUY, TP ({tp_price}) must be above entry ({entry_price})."
+    else:
+        if sl_price <= entry_price:
+            return f"For SELL, SL ({sl_price}) must be above entry ({entry_price})."
+        if tp_price >= entry_price:
+            return f"For SELL, TP ({tp_price}) must be below entry ({entry_price})."
+
+    rr_ratio = calculate_risk_reward_ratio(entry_price, sl_price, tp_price, order_type)
+    if rr_ratio is None:
+        return "SL/TP do not create a valid risk/reward setup."
+    if rr_ratio < min_rr:
+        return (
+            f"RR {rr_ratio:.2f} is below required 1:{min_rr}. "
+            "Move TP farther away or SL closer to entry."
+        )
+
+    return None
+
+
 def get_deal_pnl(deal):
     return (
         float(getattr(deal, "profit", 0) or 0)

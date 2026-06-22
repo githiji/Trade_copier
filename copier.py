@@ -10,7 +10,8 @@ import threading
 import time
 from datetime import datetime
 from tkinter import messagebox
-from risk_manager import get_broker_symbol, calculate_lot, get_pip_size, calculate_risk_reward_ratio, get_deal_pnl, is_closed_copier_deal, get_risk_tracker, apply_trade_result_to_tracker, update_risk_tracker_from_history, get_managed_risk_percent
+from risk_manager import get_broker_symbol, calculate_lot, get_pip_size, calculate_risk_reward_ratio, get_trade_validation_error, get_deal_pnl, is_closed_copier_deal, get_risk_tracker, apply_trade_result_to_tracker, update_risk_tracker_from_history, get_managed_risk_percent
+from event_manager import collect_account_trade_events, init_event_db, record_order_send_event, record_trade_event
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,10 +27,72 @@ LOSS_STREAK_LIMIT = 3
 RISK_TRACKER_STARTED_AT = datetime.now()
 risk_trackers = {}
 risk_tracker_lock = threading.Lock()
+event_collection_running = False
+event_collection_thread = None
 
 # === Your accounts ===
 def get_enabled_accounts():
     return get_accounts_for_copier(enabled_only=True)
+
+
+def collect_trading_events(poll_interval=15):
+    global event_collection_running
+    init_event_db()
+
+    while event_collection_running:
+        for acc in get_enabled_accounts():
+            if not event_collection_running:
+                break
+
+            login = str(acc["login"])
+            if not mt5.initialize(path=acc["path"], login=int(acc["login"]), password=acc["password"], server=acc["server"]):
+                print(f"Event collector connection failed for {login}: {mt5.last_error()}")
+                continue
+
+            try:
+                collect_account_trade_events(login)
+            finally:
+                mt5.shutdown()
+
+        for _ in range(poll_interval):
+            if not event_collection_running:
+                break
+            time.sleep(1)
+
+
+def start_trade_event_collection(poll_interval=15):
+    global event_collection_running, event_collection_thread
+    if event_collection_thread and event_collection_thread.is_alive():
+        return
+
+    event_collection_running = True
+    event_collection_thread = threading.Thread(
+        target=collect_trading_events,
+        args=(poll_interval,),
+        daemon=True,
+    )
+    event_collection_thread.start()
+    print("Trade event collection started.")
+
+
+def stop_trade_event_collection():
+    global event_collection_running
+    event_collection_running = False
+    print("Trade event collection stopped.")
+
+
+def log_order_send(login, event_type, request, result):
+    try:
+        record_order_send_event(login, event_type, request, result)
+    except Exception as exc:
+        print(f"Could not record {event_type} event for {login}: {exc}")
+
+
+def collect_current_account_events(login):
+    try:
+        collect_account_trade_events(str(login))
+    except Exception as exc:
+        print(f"Could not collect trade events for {login}: {exc}")
 
 
 
@@ -47,25 +110,59 @@ def open_account_manager():
 
 def place_trade_for_all_accounts(symbol, entry, sl, tp, order_type, pip_value, risk_percent=1, manual_lot=None):
     for acc in get_enabled_accounts():
-        print(f"Connecting to account {acc['login']}...")
+        login = str(acc["login"])
+        print(f"Connecting to account {login}...")
        
 
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
             print(f"Connection failed: {mt5.last_error()}")
+            record_trade_event(
+                account_login=login,
+                event_type="open_connection_failed",
+                status="failed",
+                symbol=symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message=str(mt5.last_error()),
+            )
             continue
 
         acc_info = mt5.account_info()
         if acc_info is None:
             print("Failed to get account info")
+            record_trade_event(
+                account_login=login,
+                event_type="open_account_info_failed",
+                status="failed",
+                symbol=symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message=str(mt5.last_error()),
+            )
             mt5.shutdown()
             continue
 
-        login = str(acc["login"])
         update_risk_tracker_from_history(login)
 
+        validation_error = get_trade_validation_error(entry, sl, tp, order_type, MIN_RISK_REWARD_RATIO)
         rr_ratio = calculate_risk_reward_ratio(entry, sl, tp, order_type)
-        if rr_ratio is None:
-            print(f"Skipped trade for {login}: invalid SL/TP for {order_type}.")
+        if validation_error:
+            print(f"Skipped trade for {login}: {validation_error}")
+            record_trade_event(
+                account_login=login,
+                event_type="open_skipped",
+                status="skipped",
+                symbol=symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message=validation_error,
+            )
             mt5.shutdown()
             continue
 
@@ -73,6 +170,17 @@ def place_trade_for_all_accounts(symbol, entry, sl, tp, order_type, pip_value, r
             print(
                 f"Skipped trade for {login}: RR {rr_ratio:.2f} is below "
                 f"1:{MIN_RISK_REWARD_RATIO}."
+            )
+            record_trade_event(
+                account_login=login,
+                event_type="open_skipped",
+                status="skipped",
+                symbol=symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message=f"RR {rr_ratio:.2f} below 1:{MIN_RISK_REWARD_RATIO}.",
             )
             mt5.shutdown()
             continue
@@ -88,12 +196,34 @@ def place_trade_for_all_accounts(symbol, entry, sl, tp, order_type, pip_value, r
         print(f"Account: {login}, Balance: {acc_info.balance}, Lot: {lot}, {risk_label}, RR: {rr_ratio:.2f}")
         broker_symbol = get_broker_symbol(symbol)
         if not broker_symbol:
+            record_trade_event(
+                account_login=login,
+                event_type="open_skipped",
+                status="skipped",
+                symbol=symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message="No matching broker symbol.",
+            )
             print(f"❌ No matching symbol for {symbol}")
             mt5.shutdown()
             continue
         tick = mt5.symbol_info_tick(broker_symbol)
 
         if tick is None:
+            record_trade_event(
+                account_login=login,
+                event_type="open_skipped",
+                status="skipped",
+                symbol=broker_symbol,
+                side=order_type,
+                price=entry,
+                sl=sl,
+                tp=tp,
+                message="Failed to get symbol tick.",
+            )
             print(f"❌ Failed to get tick for {broker_symbol}")
             mt5.shutdown()
             continue
@@ -119,16 +249,25 @@ def place_trade_for_all_accounts(symbol, entry, sl, tp, order_type, pip_value, r
         }
 
         result = mt5.order_send(request)
+        log_order_send(login, "order_send_open", request, result)
+        collect_current_account_events(login)
         print("Trade result:", result)
         mt5.shutdown()
 
 
 def close_all_positions():
     for acc in get_enabled_accounts():
-        print(f"Closing trades for account {acc['login']}...")
+        login = str(acc["login"])
+        print(f"Closing trades for account {login}...")
 
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
             print(f"Connection failed: {mt5.last_error()}")
+            record_trade_event(
+                account_login=login,
+                event_type="close_all_connection_failed",
+                status="failed",
+                message=str(mt5.last_error()),
+            )
             continue
 
         positions = mt5.positions_get()
@@ -160,7 +299,10 @@ def close_all_positions():
                 }
 
                 result = mt5.order_send(close_request)
+                log_order_send(login, "order_send_close", close_request, result)
                 print("Close result:", result)
+
+            collect_current_account_events(login)
 
         mt5.shutdown() 
 
@@ -173,13 +315,16 @@ def monitor_profit_loss(target_profit, max_loss):
         total_profit = 0
 
         for acc in get_enabled_accounts():
+            login = str(acc["login"])
             if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
+                print(f"Monitor connection failed for {login}: {mt5.last_error()}")
                 continue
 
             positions = mt5.positions_get()
             if positions:
                 total_profit += sum(pos.profit for pos in positions)
 
+            collect_current_account_events(login)
             mt5.shutdown()
             time.sleep(2)
         print(f"Current Total Profit: {total_profit}") 
@@ -202,23 +347,33 @@ def get_total_profit():
     total_profit = 0
 
     for acc in get_enabled_accounts():
+        login = str(acc["login"])
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
+            print(f"PnL connection failed for {login}: {mt5.last_error()}")
             continue
 
         positions = mt5.positions_get()
         if positions:
             total_profit += sum(pos.profit for pos in positions)
 
+        collect_current_account_events(login)
         mt5.shutdown()
 
     return total_profit
   
 def close_partial(percent):
     for acc in get_enabled_accounts():
-        print(f"Partial close ({percent}%) for account {acc['login']}...")
+        login = str(acc["login"])
+        print(f"Partial close ({percent}%) for account {login}...")
 
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
             print("Connection failed")
+            record_trade_event(
+                account_login=login,
+                event_type="partial_close_connection_failed",
+                status="failed",
+                message=str(mt5.last_error()),
+            )
             continue
 
         positions = mt5.positions_get()
@@ -251,16 +406,26 @@ def close_partial(percent):
                 }
 
                 result = mt5.order_send(request)
+                log_order_send(login, "order_send_partial_close", request, result)
                 print("Partial result:", result)
+
+            collect_current_account_events(login)
 
         mt5.shutdown()
 
 def move_to_breakeven():
     for acc in get_enabled_accounts():
-        print(f"Breakeven for account {acc['login']}...")
+        login = str(acc["login"])
+        print(f"Breakeven for account {login}...")
 
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
             print("Connection failed")
+            record_trade_event(
+                account_login=login,
+                event_type="breakeven_connection_failed",
+                status="failed",
+                message=str(mt5.last_error()),
+            )
             continue
 
         positions = mt5.positions_get()
@@ -278,7 +443,10 @@ def move_to_breakeven():
                 }
 
                 result = mt5.order_send(request)
+                log_order_send(login, "order_send_breakeven", request, result)
                 print("Breakeven result:", result)
+
+            collect_current_account_events(login)
 
         mt5.shutdown()
 
@@ -301,8 +469,15 @@ def monitor_trailing_stop(trail_pips, check_interval=1):
             if not trailing_running:
                 break
 
+            login = str(acc["login"])
             if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
                 print(f"Connection failed: {mt5.last_error()}")
+                record_trade_event(
+                    account_login=login,
+                    event_type="trailing_stop_connection_failed",
+                    status="failed",
+                    message=str(mt5.last_error()),
+                )
                 continue
 
             positions = mt5.positions_get()
@@ -354,7 +529,10 @@ def monitor_trailing_stop(trail_pips, check_interval=1):
                     }
 
                     result = mt5.order_send(request)
+                    log_order_send(login, "order_send_trailing_sl", request, result)
                     print(f"Trailing SL result for {pos.symbol} #{pos.ticket}: {result}")
+
+                collect_current_account_events(login)
 
             mt5.shutdown()
 
@@ -373,10 +551,17 @@ def set_stop_loss_price_for_all_accounts(sl_price, base_symbol=None):
     base_symbol = base_symbol.strip().upper() if base_symbol else None
 
     for acc in get_enabled_accounts():
-        print(f"Setting SL to {sl_price} for account {acc['login']}...")
+        login = str(acc["login"])
+        print(f"Setting SL to {sl_price} for account {login}...")
 
         if not mt5.initialize(path=acc['path'], login=int(acc['login']), password=acc['password'], server=acc['server']):
             print(f"Connection failed: {mt5.last_error()}")
+            record_trade_event(
+                account_login=login,
+                event_type="set_sl_connection_failed",
+                status="failed",
+                message=str(mt5.last_error()),
+            )
             continue
 
         positions = mt5.positions_get()
@@ -413,17 +598,19 @@ def set_stop_loss_price_for_all_accounts(sl_price, base_symbol=None):
                 }
 
                 result = mt5.order_send(request)
+                log_order_send(login, "order_send_set_sl", request, result)
                 print(f"Set SL result for {pos.symbol} #{pos.ticket}: {result}")
+
+            collect_current_account_events(login)
 
         mt5.shutdown()
 
 def run_ui():
-    from ui import launch_ui,launch_floating_panel,launch_account_manager
+    from ui import launch_ui, launch_account_manager
     if "--accounts" in sys.argv:
         launch_account_manager()
     else:
-        threading.Thread(target=launch_ui, daemon=True).start()
-        launch_floating_panel()
+        start_trade_event_collection()
         launch_ui()
 
 if __name__ == "__main__":
