@@ -6,13 +6,15 @@ import tkinter as tk
 import MetaTrader5 as mt5
 
 from copier import  open_account_manager, get_total_profit, monitor_profit_loss, stop_auto_close, close_all_positions,place_trade_for_all_accounts, set_stop_loss_price_for_all_accounts, close_partial, move_to_breakeven
+from event_manager import get_recent_trade_events
 
 from tkinter import ttk, messagebox
-from risk_manager import get_broker_symbol, calculate_lot, get_pip_size, calculate_risk_reward_ratio, get_deal_pnl, is_closed_copier_deal, get_risk_tracker, apply_trade_result_to_tracker, update_risk_tracker_from_history, get_managed_risk_percent, COPIER_MAGIC, risk_trackers, risk_tracker_lock, REDUCED_RISK_PERCENT 
+from risk_manager import get_broker_symbol, calculate_lot, get_pip_size, calculate_risk_reward_ratio, get_trade_validation_error, get_deal_pnl, is_closed_copier_deal, get_risk_tracker, apply_trade_result_to_tracker, update_risk_tracker_from_history, get_managed_risk_percent, COPIER_MAGIC, risk_trackers, risk_tracker_lock, REDUCED_RISK_PERCENT 
 
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 symbols_pip_values = {'XAUUSD':1, 'GBPUSD':10}
+quick_trade_window = None
 FONT = ("Segoe UI", 10)
 FONT_SMALL = ("Segoe UI", 9)
 FONT_HEADER = ("Segoe UI Semibold", 13)
@@ -108,6 +110,26 @@ def configure_dark_theme(window):
     )
     style.configure("Accent.TButton", background=COLORS["accent"], foreground="white")
     style.map("Accent.TButton", background=[("active", COLORS["accent_hover"]), ("pressed", COLORS["accent"])])
+    style.configure(
+        "Treeview",
+        background=COLORS["field"],
+        fieldbackground=COLORS["field"],
+        foreground=COLORS["text"],
+        bordercolor=COLORS["border"],
+        rowheight=28,
+    )
+    style.configure(
+        "Treeview.Heading",
+        background=COLORS["panel_alt"],
+        foreground=COLORS["text"],
+        bordercolor=COLORS["border"],
+        relief="flat",
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", COLORS["accent"])],
+        foreground=[("selected", "white")],
+    )
 
 
 def dark_entry(parent, justify="left"):
@@ -136,6 +158,152 @@ def launch_account_manager():
     AccountManager(window)
     window.mainloop()
 
+
+def format_event_value(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def open_events_window(parent):
+    window = tk.Toplevel(parent)
+    window.title("Trading Events")
+    window.geometry("1060x540")
+    window.minsize(860, 420)
+    set_window_icon(window)
+    configure_dark_theme(window)
+    window.attributes("-topmost", True)
+
+    main = ttk.Frame(window, padding=14)
+    main.pack(fill="both", expand=True)
+
+    header = ttk.Frame(main)
+    header.pack(fill="x", pady=(0, 10))
+
+    ttk.Label(header, text="Trading Events", style="Header.TLabel").pack(side="left")
+    refresh_button = ttk.Button(header, text="Refresh", style="Accent.TButton")
+    refresh_button.pack(side="right")
+
+    table_frame = ttk.Frame(main)
+    table_frame.pack(fill="both", expand=True)
+    table_frame.columnconfigure(0, weight=1)
+    table_frame.rowconfigure(0, weight=1)
+
+    columns = (
+        "event_time",
+        "account_login",
+        "event_type",
+        "status",
+        "symbol",
+        "side",
+        "volume",
+        "price",
+        "profit",
+        "message",
+    )
+    headings = {
+        "event_time": "Time",
+        "account_login": "Account",
+        "event_type": "Event",
+        "status": "Status",
+        "symbol": "Symbol",
+        "side": "Side",
+        "volume": "Volume",
+        "price": "Price",
+        "profit": "Profit",
+        "message": "Message",
+    }
+    widths = {
+        "event_time": 145,
+        "account_login": 95,
+        "event_type": 150,
+        "status": 80,
+        "symbol": 95,
+        "side": 85,
+        "volume": 75,
+        "price": 90,
+        "profit": 80,
+        "message": 260,
+    }
+
+    event_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=14)
+    event_table.grid(row=0, column=0, sticky="nsew")
+
+    y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=event_table.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=event_table.xview)
+    x_scroll.grid(row=1, column=0, sticky="ew")
+    event_table.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+    for column in columns:
+        event_table.heading(column, text=headings[column])
+        event_table.column(column, width=widths[column], minwidth=60, stretch=column == "message")
+
+    status_label = ttk.Label(main, text="", style="Muted.TLabel")
+    status_label.pack(fill="x", pady=(8, 0))
+
+    events_by_item = {}
+
+    def refresh_events():
+        event_table.delete(*event_table.get_children())
+        events_by_item.clear()
+
+        try:
+            events = get_recent_trade_events(300)
+        except Exception as exc:
+            status_label.configure(text=f"Could not load events: {exc}")
+            return
+
+        for event in events:
+            values = tuple(format_event_value(event.get(column)) for column in columns)
+            item_id = event_table.insert("", tk.END, values=values)
+            events_by_item[item_id] = event
+
+        status_label.configure(text=f"{len(events)} recent events")
+
+    def show_event_details(_event=None):
+        selection = event_table.selection()
+        if not selection:
+            return
+
+        event = events_by_item.get(selection[0], {})
+        details = tk.Toplevel(window)
+        details.title("Event Details")
+        details.geometry("720x460")
+        details.minsize(560, 320)
+        set_window_icon(details)
+        configure_dark_theme(details)
+        details.attributes("-topmost", True)
+
+        text = tk.Text(
+            details,
+            bg=COLORS["field"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=10,
+            font=("Consolas", 10),
+        )
+        text.pack(fill="both", expand=True, padx=12, pady=12)
+        text.insert(tk.END, "\n".join(f"{key}: {format_event_value(value)}" for key, value in event.items()))
+        text.configure(state="disabled")
+
+    refresh_button.configure(command=refresh_events)
+    event_table.bind("<Double-1>", show_event_details)
+
+    refresh_events()
+
+    def auto_refresh_events():
+        if not window.winfo_exists():
+            return
+        refresh_events()
+        window.after(5000, auto_refresh_events)
+
+    window.after(5000, auto_refresh_events)
+
+
 def action_button(parent, text, command, bg=None, hover=None, fg="white", height=2):
     bg = bg or COLORS["panel_alt"]
     hover = hover or COLORS["border"]
@@ -160,14 +328,38 @@ def action_button(parent, text, command, bg=None, hover=None, fg="white", height
     return button
 
 
-def launch_floating_panel():
-    window = tk.Tk()
+def launch_floating_panel(parent=None):
+    global quick_trade_window
+
+    if quick_trade_window is not None:
+        try:
+            if quick_trade_window.winfo_exists():
+                quick_trade_window.lift()
+                quick_trade_window.focus_force()
+                return
+        except tk.TclError:
+            quick_trade_window = None
+
+    window = tk.Toplevel(parent) if parent is not None else tk.Tk()
+    quick_trade_window = window
     window.title("Trade Copier Quick Panel")
     set_window_icon(window)
     window.geometry("280x440")
     configure_dark_theme(window)
     window.attributes("-topmost", True)
     window.overrideredirect(True)
+
+    def close_panel():
+        global quick_trade_window
+        quick_trade_window = None
+        window.destroy()
+
+    def clear_panel_reference(event):
+        global quick_trade_window
+        if event.widget == window:
+            quick_trade_window = None
+
+    window.bind("<Destroy>", clear_panel_reference, add="+")
 
     # === DRAGGING FUNCTION ===
     def start_move(event):
@@ -201,7 +393,7 @@ def launch_floating_panel():
         font=("Segoe UI Semibold", 10),
     ).pack(side="left")
 
-    close_btn = action_button(header, "X", window.destroy, bg=COLORS["panel_alt"], hover=COLORS["danger"], height=1)
+    close_btn = action_button(header, "X", close_panel, bg=COLORS["panel_alt"], hover=COLORS["danger"], height=1)
     close_btn.pack(side="right", ipadx=4, ipady=0)
 
     main = tk.Frame(shell, bg=COLORS["panel"])
@@ -222,7 +414,8 @@ def launch_floating_panel():
         return entry
 
     symbol_entry = create_quick_entry(0, 0, "Symbol", "GBPUSD")
-    lot_entry = create_quick_entry(0, 1, "Lot")
+    risk_entry = create_quick_entry(0, 1, "Risk", "Auto")
+    risk_entry.configure(state="disabled", disabledbackground=COLORS["field"], disabledforeground=COLORS["muted"])
     sl_entry = create_quick_entry(1, 0, "SL")
     tp_entry = create_quick_entry(1, 1, "TP")
     trail_entry = create_quick_entry(2, 0, "Trail SL")
@@ -242,14 +435,13 @@ def launch_floating_panel():
         symbol = symbol_entry.get().strip().upper()
         sl = read_float(sl_entry, 0)
         tp = read_float(tp_entry, 0)
-        lot = read_float(lot_entry, 0) or None
         pip_value = symbols_pip_values.get(symbol, 10)
-        return symbol, sl, tp, lot, pip_value
+        return symbol, sl, tp, pip_value
 
     # === BUY
     def buy():
         try:
-            symbol, sl, tp, lot, pip_value = get_inputs()
+            symbol, sl, tp, pip_value = get_inputs()
 
             if not mt5.initialize():
                 return
@@ -267,10 +459,15 @@ def launch_floating_panel():
                 return
 
             entry = tick.ask
+            validation_error = get_trade_validation_error(entry, sl, tp, "market_buy")
+            if validation_error:
+                mt5.shutdown()
+                messagebox.showerror("Invalid BUY Setup", validation_error)
+                return
 
             threading.Thread(
                 target=place_trade_for_all_accounts,
-                args=(symbol, entry, sl, tp, "market_buy", pip_value, 1, lot),
+                args=(symbol, entry, sl, tp, "market_buy", pip_value, 1, None),
                 daemon=True
             ).start()
 
@@ -282,7 +479,7 @@ def launch_floating_panel():
     # === SELL
     def sell():
         try:
-            symbol, sl, tp, lot, pip_value = get_inputs()
+            symbol, sl, tp, pip_value = get_inputs()
 
             if not mt5.initialize():
                 return
@@ -300,10 +497,15 @@ def launch_floating_panel():
                 return
 
             entry = tick.bid
+            validation_error = get_trade_validation_error(entry, sl, tp, "market_sell")
+            if validation_error:
+                mt5.shutdown()
+                messagebox.showerror("Invalid SELL Setup", validation_error)
+                return
 
             threading.Thread(
                 target=place_trade_for_all_accounts,
-                args=(symbol, entry, sl, tp, "market_sell", pip_value, 1, lot),
+                args=(symbol, entry, sl, tp, "market_sell", pip_value, 1, None),
                 daemon=True
             ).start()
 
@@ -374,15 +576,16 @@ def launch_floating_panel():
         hover=COLORS["danger_hover"],
     ).pack(fill="x", pady=(7, 0))
 
-    window.mainloop()
+    if parent is None:
+        window.mainloop()
 
   
 def launch_ui():
     window = tk.Tk()
     window.title("Trade Copier")
     set_window_icon(window)
-    window.geometry("420x360")
-    window.minsize(380, 320)
+    window.geometry("420x410")
+    window.minsize(380, 370)
     configure_dark_theme(window)
     window.attributes('-topmost', True)
 
@@ -393,12 +596,31 @@ def launch_ui():
     header.pack(fill="x", pady=(0, 12))
 
     ttk.Label(header, text="Trade Copier", style="Header.TLabel").pack(side="left")
+
+    header_actions = ttk.Frame(header)
+    header_actions.pack(side="right")
+
     ttk.Button(
-        header,
+        header_actions,
+        text="Events",
+        command=lambda: open_events_window(window)
+    ).pack(side="left", padx=(0, 6))
+
+    ttk.Button(
+        header_actions,
         text="Accounts",
         style="Accent.TButton",
         command=open_account_manager
-    ).pack(side="right")
+    ).pack(side="left")
+
+    action_button(
+        main,
+        "Quick Trade",
+        lambda: launch_floating_panel(window),
+        bg=COLORS["accent"],
+        hover=COLORS["accent_hover"],
+        height=1,
+    ).pack(fill="x", pady=(0, 10))
 
     # === PnL ===
     status_panel = ttk.Frame(main, style="Panel.TFrame", padding=12)

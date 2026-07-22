@@ -11,7 +11,10 @@ import time
 from datetime import datetime
 from tkinter import messagebox
 from risk_manager import get_broker_symbol, calculate_lot, get_pip_size, calculate_risk_reward_ratio, get_trade_validation_error, get_deal_pnl, is_closed_copier_deal, get_risk_tracker, apply_trade_result_to_tracker, update_risk_tracker_from_history, get_managed_risk_percent
-from event_manager import collect_account_trade_events, init_event_db, record_order_send_event, record_trade_event
+from event_manager import collect_account_trade_events, init_event_db, record_order_send_event, record_trade_event,event_sync_worker
+from api.login_window import show_login
+from api.config import get_token
+
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -88,11 +91,15 @@ def log_order_send(login, event_type, request, result):
         print(f"Could not record {event_type} event for {login}: {exc}")
 
 
-def collect_current_account_events(login):
-    try:
-        collect_account_trade_events(str(login))
-    except Exception as exc:
-        print(f"Could not collect trade events for {login}: {exc}")
+def collect_current_account_events(login, attempts=1, delay=0.5):
+    for attempt in range(attempts):
+        try:
+            collect_account_trade_events(str(login))
+        except Exception as exc:
+            print(f"Could not collect trade events for {login}: {exc}")
+
+        if attempt < attempts - 1:
+            time.sleep(delay)
 
 
 
@@ -302,7 +309,7 @@ def close_all_positions():
                 log_order_send(login, "order_send_close", close_request, result)
                 print("Close result:", result)
 
-            collect_current_account_events(login)
+            collect_current_account_events(login, attempts=5)
 
         mt5.shutdown() 
 
@@ -409,7 +416,7 @@ def close_partial(percent):
                 log_order_send(login, "order_send_partial_close", request, result)
                 print("Partial result:", result)
 
-            collect_current_account_events(login)
+            collect_current_account_events(login, attempts=5)
 
         mt5.shutdown()
 
@@ -604,14 +611,27 @@ def set_stop_loss_price_for_all_accounts(sl_price, base_symbol=None):
             collect_current_account_events(login)
 
         mt5.shutdown()
+def start_background_services():
+    threading.Thread(
+        target=event_sync_worker,
+        daemon=True
+    ).start()
 
+    print("✅ Event Sync started")
 def run_ui():
     from ui import launch_ui, launch_account_manager
     if "--accounts" in sys.argv:
         launch_account_manager()
     else:
         start_trade_event_collection()
+        start_background_services()
         launch_ui()
-
+        
+    
 if __name__ == "__main__":
-    run_ui()
+    if get_token():
+        run_ui()
+    
+    else:
+        show_login(on_success=run_ui)
+    
